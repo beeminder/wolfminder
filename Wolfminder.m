@@ -1,7 +1,6 @@
 
 BeginPackage["Wolfminder`"]
 
-
 usr::usage = "Beeminder username";
 
 key::usage = "\
@@ -12,8 +11,15 @@ userget;
 goalget;
 goalput;
 allgoals;
+showroad;
+(* dataput *)
+(* dataget *)
+
+retrat;
 
 Begin["`Private`"];  (*********************************************************)
+
+baseurl = "https://www.beeminder.com/api/v1/";
 
 (***************************** Utility functions ******************************)
 ARGV = args = Drop[$CommandLine, 4];        (* Command line args.             *)
@@ -21,7 +27,7 @@ pr = WriteString["stdout", ##]&;            (* More                           *)
 prn = pr[##, "\n"]&;                        (*  convenient                    *)
 perr = WriteString["stderr", ##]&;          (*   print                        *)
 perrn = perr[##, "\n"]&;                    (*    statements.                 *)
-re = RegularExpression;                     (* I wish Wolfram weren't         *)
+re = RegularExpression;                     (* I wish Wolframaic weren't      *)
 EOF = EndOfFile;                            (*   so damn verbose!             *)
 read[] := InputString[""];                  (* Grab a line from stdin.        *)
 readList[] := Most@                         (* Grab the list of all the lines *)
@@ -46,10 +52,42 @@ all[f_, l_List] := Null ===                 (* Similarly, And @@ f/@l         *)
   Scan[If[!f[#], Return[False]]&, l];       (*  (but with lazy evaluation).   *)
 (******************************************************************************)
 
+(* The builtin JSON parsing with ImportString fails on unicode strings.
+   This seems to be more robust. 
+   Cf http://stackoverflow.com/questions/2633003/parsing-and-generating-json *)
+parseJSON[json_String] := With[{tr = {"["     -> "(*_MAGIC_TOKEN_[*){",
+                                      "]"     -> "(*_MAGIC_TOKEN_]*)}",
+                                      ":"     -> "(*_MAGIC_TOKEN_:*)->",
+                                      "true"  -> "(*_MAGIC_TOKEN_t*)True",
+                                      "false" -> "(*_MAGIC_TOKEN_f*)False",
+                                      "null"  -> "(*_MAGIC_TOKEN_n*)Null",
+                                      "e"     -> "(*_MAGIC_TOKEN_e*)*10^",
+                                      "E"     -> "(*_MAGIC_TOKEN_E*)*10^"}},
+  eval@StringReplace[cat@FullForm@eval[StringReplace[json, tr]], Reverse/@tr]]
 
-baseurl = "https://www.beeminder.com/api/v1/";
+(* Similar problems with the builtin ExportString[_, "JSON"] *)
+jnum[x_] := StringReplace[
+  ToString@NumberForm[N@x, ExponentFunction->(Null&)], re@"\\.$"->""]
+genJSON[a_ -> b_]  := genJSON[a] <> ":" <> genJSON[b]
+genJSON[{x__Rule}] := "{" <> cat @@ Riffle[genJSON /@ {x}, ", "] <> "}"
+genJSON[{x___}]    := "[" <> cat @@ Riffle[genJSON /@ {x}, ", "] <> "]"
+genJSON[Null]      := "null"
+genJSON[True]      := "true"
+genJSON[False]     := "false"
+genJSON[x_]        := jnum[x] /; NumberQ[x]
+genJSON[x_]        := "\"" <> StringReplace[cat[x], "\""->"\\\""] <> "\""
 
-UPOCH = AbsoluteTime[DateObject[{1970,1,1, 0,0,0}, TimeZone->0]];
+
+(* Mathematica 10.1 introduced UnixTime; this is a backport *)
+(* And, annoyingly, Names["UnixTime"] is not the empty list in version 10.0 
+   so we have to check the version number explicitly. *)
+(*
+If[$VersionNumber < 10.1,
+  UPOCH = AbsoluteTime[DateObject[{1970,1,1, 0,0,0}, TimeZone->0]];
+  UnixTime[x___] := Round[AbsoluteTime[x] - UPOCH];
+  FromUnixTime[t_] := DateObject[AbsoluteTime[t+UPOCH]];
+];
+*)
 
 DIY = 365.25; (* this is what physicists use, eg, to define a light year *)
 SID = 86400;  (* seconds in day *)
@@ -59,35 +97,50 @@ SECS = <| "y" -> DIY*SID,
           "d" -> SID,
           "h" -> 3600 |>;
 
-jsonify[x_] := ExportString[x, "JSON", "Compact"->True]
+(* Show Number. Convert x to string w/ no trailing dot. Target a total of sf 
+   significant figures, clipped to be at least i and at most i+Ceiling[sf/2],
+   where i is the number of digits in the integer part of x. Can also specify 
+   explicit prefix strings for positive and negative numbers, typically for when
+   you want an explicit plus sign in front positive numbers, like for specifying
+   a delta. *)
+Off[NumberForm::"sigz"]; (* o.w. ~10^100 in non-scientific notation complains *)
+shn[x_, sf_:10, s_:{"-",""}] := If[!NumericQ[x], cat[x],
+  With[{i= IntegerLength@IntegerPart@x, d = Ceiling[sf/2]},
+    StringReplace[ToString@NumberForm[N@x, Clip[sf, {i,i+d}],
+                                     ExponentFunction->(Null&), NumberSigns->s],
+                  re@"\\.$"->""]]]
+shns[x_, sf_:10] := shn[x, sf, {"-","+"}]
 
-(* TODO: don't use querystring *)
 userget::usage = "Return Associaion of user info"
-userget[] := Association@Import[baseurl <> "users/me.json?auth_token=" <> key]
+userget[] := Association@parseJSON@URLFetch[baseurl<>"users/me.json", 
+  "Method"->"GET", "Parameters"->{"auth_token"->key}]
 
-(* TODO: don't use querystring *)
 goalget::usage = "Return a hash of goal parameters for goal slug g";
-goalget[g_] := Association@Import[
-  baseurl<>"users/me/goals/"<>g<>".json?auth_token="<>key, "JSON"]
+goalget[g_] := Association@parseJSON@URLFetch[
+  baseurl<>"users/me/goals/"<>g<>".json", "Method"->"GET",
+    "Parameters"->{"auth_token"->key}]
 
 (* Update goal with slug g with hash h *)
 goalput[g_, h___] := URLFetch[baseurl<>"users/me/goals/"<>g<>".json", 
-  "Method"->"PUT", "Parameters"->{"auth_token"->key, h}]
+  "Method"->"PUT", "Parameters"->{"auth_token"->key, 
+  Sequence@@(#1->genJSON[#2]& @@@ {h})}]
 
 allgoals::usage = "Return a list of goal Associations"
-allgoals[] := Association /@ ImportString[
-   URLFetch[baseurl<>"users/me/goals.json", "Method"->"GET",
-            "Parameters"->{"auth_token"->key}], "JSON"]
+allgoals[] := Association /@ parseJSON@URLFetch[baseurl<>"users/me/goals.json",
+  "Method"->"GET", "Parameters"->{"auth_token"->key}]
 
-shdt[t_] := DateString[t + UPOCH, {"MonthNameShort", "Day"}]
+shdt[Null] := ""
+shdt[t_] := DateString[FromUnixTime[t], {"MonthNameShort", "Day"}]
 
 shv[v_]      := If[v === Null, "", shn@v]
 shr[r_, ru_] := If[r === Null, "", cat[shn@r, "/", ru]]
 
-showroad[gs_] := With[{g = goalget[gs]},
-  Grid[{{MatrixForm[{shdt@#1, shv@#2, shr[#3, g["runits"]]} & @@@ 
-       g["roadall"]], Import[g["thumb_url"]]}}]]
+(* Helper for showroad that takes the road matrix and runits *)
+showroad0[road_, ru_] := MatrixForm[{shdt@#1, shv@#2, shr[#3, ru]}& @@@ road]
 
+(* Return human-friendly representation of a goal's YBR *)
+showroad[gs_String] := With[{g = goalget[gs]},
+  Grid[{{showroad0[g@"roadall", g@"runits"], Import[g@"thumb_url"]}}]]
 
 
 (*
@@ -98,21 +151,47 @@ MOAR/PHAT: tini,vini -> tcur+b-1,vcur
 WEEN/RASH: tini,vini -> tcur,vcur+yaw*rcur*(b-1)
 *)
 
-(* Take a roadall, tcur/vcur, runits, dir, yaw, and the desired number of days 
-   of safety buffer (b) and return a new roadall that goes from {tini,vini} to 
-   tfin -- no rows except the {tfin,vfin,rfin} row. *)
+(* Take start and end points of a road, tcur/vcur, runits, dir, yaw, and the 
+   desired number of days of safety buffer (b) and return a new roadall that 
+   goes from {tini,vini} to tfin -- no rows except the {tfin,vfin,rfin} row. *)
+(* SCHDEL
 rr0[{{tini_, vini_, _}, ___, {tfin_, vfin_, rfin_}}, tcur_, vcur_, runits_, 
-    dir_, yaw_, b_] := With[ru = SECS[runits],
+    dir_, yaw_, b_] := With[{ru = SECS[runits]},
   If[dir*yaw > 0,
     {{tini,vini, Null}, {tfin, Null, (vcur-vini)/(tcur+b*SID-1-tini)*ru}},
     {{tini,vini, Null}, {tfin, Null, (vcur-vini)/(tcur-tini+yaw(b-1)*SID)*ru}}]]
+*)
+rr0[tini_, vini_, {tfin_, vfin_, _}, tcur_, vcur_, runits_, dir_, yaw_, b_] :=
+  With[{u = SECS[runits]},
+    If[dir*yaw > 0,
+      {{tini,vini, Null}, {tfin, Null, (vcur-vini)/(tcur+b*SID-1-tini)*u}},
+      {{tini,vini, Null}, {tfin, Null, (vcur-vini)/(tcur-tini+yaw(b-1)*SID)*u}}
+  ]]
 
 (* Take a goal slug g and retroratchet it so it has b days of safety buffer *)
-retrat[g_, b_] := Module[{h, rr}, 
-  h = goalget[g];
-  rr = rr0[h@"roadall", h@"curday", h@"curval", h@"runits", h@"dir",h@"yaw", b];
-  goalput[g, "roadall" -> jsonify[rr]]]
+retrat[gs_, b_] := Module[
+  {g, siru, ra, dir, yaw, tini,vini, tcur,vcur, tfin,vfin,rfin, rr}, 
+  g = goalget[gs];
+  siru = SECS[g@"runits"];
+  ra = g@"roadall";
+  {dir, yaw} = {g@"dir", g@"yaw"};
+  {tini, vini} = {g@"initday", g@"initval"};
+  {tcur, vcur} = {g@"curday", g@"curval"};
+  {tfin, vfin, rfin} = g@"mathishard";
 
+  rr = {{tini, vini, Null}}; (* just tini/vini for first row *)
+  AppendTo[rr, {tcur, Null, 
+    If[dir*yaw > 0,
+      (vcur-vini)/(tcur+b*SID-1-tini)*siru,
+      (vcur-vini)/(tcur-tini+yaw*(b-1)*SID)*siru
+    ]}];
+  AppendTo[rr, {tfin, vfin}]
+
+  rr = rr0[g@"initday", g@"initval", g@"mathishard", g@"curday", g@"curval", 
+           g@"runits", g@"dir",g@"yaw", b];
+  goalput[gs, "roadall" -> genJSON[rr]]]
+
+(* TODO: canonicalize road matrix to merge redundant segments *)
 
 End[]; (* Private context *)
 EndPackage[];
