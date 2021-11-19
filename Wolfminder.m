@@ -7,6 +7,7 @@ key::usage = "\
 Beeminder personal auth key -- https://www.beeminder.com/api/v1/auth_token.json\
 ";
 
+datapost;
 userget;
 goalget;
 goalput;
@@ -14,6 +15,9 @@ allgoals;
 showroad;
 (* dataput *)
 (* dataget *)
+parseJSON; (* Normally no need to expose JSON parsing *)
+genJSON;
+mMap;
 
 retrat;
 
@@ -22,13 +26,12 @@ Begin["`Private`"];  (*********************************************************)
 baseurl = "https://www.beeminder.com/api/v1/";
 
 (***************************** Utility functions ******************************)
-ARGV = args = Drop[$CommandLine, 4];        (* Command line args.             *)
 pr = WriteString["stdout", ##]&;            (* More                           *)
 prn = pr[##, "\n"]&;                        (*  convenient                    *)
 perr = WriteString["stderr", ##]&;          (*   print                        *)
 perrn = perr[##, "\n"]&;                    (*    statements.                 *)
 re = RegularExpression;                     (* I wish Wolframaic weren't      *)
-EOF = EndOfFile;                            (*   so damn verbose!             *)
+EOF = EndOfFile;                            (*   so dang verbose!             *)
 read[] := InputString[""];                  (* Grab a line from stdin.        *)
 readList[] := Most@                         (* Grab the list of all the lines *)
   NestWhileList[read[]&, read[], #=!=EOF&]; (*  from stdin.                   *)
@@ -39,31 +42,32 @@ spew[f_, stuf___] := With[{s= OpenWrite@f}, (* Write stuff to a file like Put *)
   WriteString[s, stuf]; Close[s]]           (*  but w/o quotes on strings.    *)
 system = Run@cat@##&;                       (* System call.                   *)
 backtick = Import[cat["!", ##], "Text"]&;   (* System call; returns stdout.   *)
-                                            (* ABOVE: mma-scripting related.  *)
-keys[f_, i_:1] :=                           (* BELOW: general utilities.      *)
-  DownValues[f, Sort->False][[All,1,1,i]];  (* Keys of a hash/dictionary.     *)
 SetAttributes[each, HoldAll];               (* each[pattern, list, body]      *)
 each[pat_, lst_List, bod_] :=               (*  converts pattern to body for  *)
   (Cases[Unevaluated@lst, pat:>bod]; Null); (*   each element of list.        *)
 each[p_, l_, b_] := (Cases[l, p:>b]; Null); (*    (Warning: eats Return[]s.)  *)
-any[f_, l_List] := True ===                 (* Whether f applied to any       *)
-  Scan[If[f[#], Return[True]]&, l];         (*  element of list is True.      *)
-all[f_, l_List] := Null ===                 (* Similarly, And @@ f/@l         *)
-  Scan[If[!f[#], Return[False]]&, l];       (*  (but with lazy evaluation).   *)
 (******************************************************************************)
 
+(* Monitored Map *)
+mMap[f_, args_List] := Module[{n = Length[args], x = 0},
+  Monitor[MapIndexed[(x = #2[[1]]; f[#1])&, args], ProgressIndicator[x/n]]]
+
 (* The builtin JSON parsing with ImportString fails on unicode strings.
-   This seems to be more robust. 
+   This seems to be more robust. Just make sure you trust the string to 
+   actually be JSON since the trick here is to do some simple substitutions and
+   then eval it. 
    Cf http://stackoverflow.com/questions/2633003/parsing-and-generating-json *)
-parseJSON[json_String] := With[{tr = {"["     -> "(*_MAGIC_TOKEN_[*){",
-                                      "]"     -> "(*_MAGIC_TOKEN_]*)}",
-                                      ":"     -> "(*_MAGIC_TOKEN_:*)->",
-                                      "true"  -> "(*_MAGIC_TOKEN_t*)True",
-                                      "false" -> "(*_MAGIC_TOKEN_f*)False",
-                                      "null"  -> "(*_MAGIC_TOKEN_n*)Null",
-                                      "e"     -> "(*_MAGIC_TOKEN_e*)*10^",
-                                      "E"     -> "(*_MAGIC_TOKEN_E*)*10^"}},
+parseJSON[json_String] := With[{tr = {"["     -> "(*_MAGIC__[__*){",
+                                      "]"     -> "(*_MAGIC__]__*)}",
+                                      ":"     -> "(*_MAGIC__:__*)->",
+                                      "true"  -> "(*_MAGIC__t__*)True",
+                                      "false" -> "(*_MAGIC__f__*)False",
+                                      "null"  -> "(*_MAGIC__n__*)Null",
+                                      "e"     -> "(*_MAGIC__e__*)*10^",
+                                      "E"     -> "(*_MAGIC__E__*)*10^"}},
   eval@StringReplace[cat@FullForm@eval[StringReplace[json, tr]], Reverse/@tr]]
+
+(* parseJSON[json_String] := ImportString[json, "JSON"] *)
 
 (* Similar problems with the builtin ExportString[_, "JSON"] *)
 jnum[x_] := StringReplace[
@@ -111,7 +115,7 @@ shn[x_, sf_:10, s_:{"-",""}] := If[!NumericQ[x], cat[x],
                   re@"\\.$"->""]]]
 shns[x_, sf_:10] := shn[x, sf, {"-","+"}]
 
-userget::usage = "Return Associaion of user info"
+userget::usage = "Return Association of user info";
 userget[] := Association@parseJSON@URLFetch[baseurl<>"users/me.json", 
   "Method"->"GET", "Parameters"->{"auth_token"->key}]
 
@@ -141,6 +145,11 @@ showroad0[road_, ru_] := MatrixForm[{shdt@#1, shv@#2, shr[#3, ru]}& @@@ road]
 (* Return human-friendly representation of a goal's YBR *)
 showroad[gs_String] := With[{g = goalget[gs]},
   Grid[{{showroad0[g@"roadall", g@"runits"], Import[g@"thumb_url"]}}]]
+
+datapost::usage = "Add list of datapoints d to a goal g";
+datapost[g_, d_] := Association@parseJSON@URLFetch[
+  baseurl<>"users/me/goals/"<>g<>"/datapoints/create_all.json",
+  "Method"->"POST", "Parameters"->{"auth_token"->key, "datapoints"->genJSON[d]}]
 
 
 (*
