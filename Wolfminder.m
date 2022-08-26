@@ -1,56 +1,40 @@
-
 BeginPackage["Wolfminder`"]
 
 usr::usage = "Beeminder username";
-
 key::usage = "\
 Beeminder personal auth key -- https://www.beeminder.com/api/v1/auth_token.json\
 ";
-
-datapost;
 userget;
 goalget;
 goalput;
 allgoals;
+dataget;
+datapost;
+dataput;
 showroad;
-(* dataput *)
-(* dataget *)
 parseJSON; (* Normally no need to expose JSON parsing *)
 genJSON;
-mMap;
 
-retrat;
+retrat; (* Work in progress *)
 
 Begin["`Private`"];  (*********************************************************)
 
 baseurl = "https://www.beeminder.com/api/v1/";
 
 (***************************** Utility functions ******************************)
-pr = WriteString["stdout", ##]&;            (* More                           *)
-prn = pr[##, "\n"]&;                        (*  convenient                    *)
-perr = WriteString["stderr", ##]&;          (*   print                        *)
-perrn = perr[##, "\n"]&;                    (*    statements.                 *)
 re = RegularExpression;                     (* I wish Wolframaic weren't      *)
 EOF = EndOfFile;                            (*   so dang verbose!             *)
-read[] := InputString[""];                  (* Grab a line from stdin.        *)
-readList[] := Most@                         (* Grab the list of all the lines *)
-  NestWhileList[read[]&, read[], #=!=EOF&]; (*  from stdin.                   *)
 cat = StringJoin@@(ToString/@{##})&;        (* Like sprintf/strout in C/C++.  *)
 eval = ToExpression[cat[##]]&;              (* Like eval in every other lang. *)
-slurp = Import[#, "Text"]&;                 (* Fetch contents of file as str. *)
-spew[f_, stuf___] := With[{s= OpenWrite@f}, (* Write stuff to a file like Put *)
-  WriteString[s, stuf]; Close[s]]           (*  but w/o quotes on strings.    *)
-system = Run@cat@##&;                       (* System call.                   *)
-backtick = Import[cat["!", ##], "Text"]&;   (* System call; returns stdout.   *)
 SetAttributes[each, HoldAll];               (* each[pattern, list, body]      *)
 each[pat_, lst_List, bod_] :=               (*  converts pattern to body for  *)
   (Cases[Unevaluated@lst, pat:>bod]; Null); (*   each element of list.        *)
 each[p_, l_, b_] := (Cases[l, p:>b]; Null); (*    (Warning: eats Return[]s.)  *)
-(******************************************************************************)
 
-(* Monitored Map *)
-mMap[f_, args_List] := Module[{n = Length[args], x = 0},
-  Monitor[MapIndexed[(x = #2[[1]]; f[#1])&, args], ProgressIndicator[x/n]]]
+SetAttributes[meach, HoldAll];              (* like each but monitor progress *)
+meach[pat_, lst_, bod_] := Module[{n = Length[lst], i = 0},
+  Monitor[each[pat, lst, i++; bod], ProgressIndicator[i/n]]]
+(******************************************************************************)
 
 (* The builtin JSON parsing with ImportString fails on unicode strings.
    This seems to be more robust. Just make sure you trust the string to 
@@ -72,6 +56,7 @@ parseJSON[json_String] := With[{tr = {"["     -> "(*_MAGIC__[__*){",
 (* Similar problems with the builtin ExportString[_, "JSON"] *)
 jnum[x_] := StringReplace[
   ToString@NumberForm[N@x, ExponentFunction->(Null&)], re@"\\.$"->""]
+genJSON[s_String]  := s (* gross special case to not do "\"foo\"" *)
 genJSON[a_ -> b_]  := genJSON[a] <> ":" <> genJSON[b]
 genJSON[{x__Rule}] := "{" <> cat @@ Riffle[genJSON /@ {x}, ", "] <> "}"
 genJSON[{x___}]    := "[" <> cat @@ Riffle[genJSON /@ {x}, ", "] <> "]"
@@ -85,7 +70,7 @@ genJSON[x_]        := "\"" <> StringReplace[cat[x], "\""->"\\\""] <> "\""
 (* Mathematica 10.1 introduced UnixTime; this is a backport *)
 (* And, annoyingly, Names["UnixTime"] is not the empty list in version 10.0 
    so we have to check the version number explicitly. *)
-(*
+(*  [probably safe to kill this by now]
 If[$VersionNumber < 10.1,
   UPOCH = AbsoluteTime[DateObject[{1970,1,1, 0,0,0}, TimeZone->0]];
   UnixTime[x___] := Round[AbsoluteTime[x] - UPOCH];
@@ -113,25 +98,31 @@ shn[x_, sf_:10, s_:{"-",""}] := If[!NumericQ[x], cat[x],
     StringReplace[ToString@NumberForm[N@x, Clip[sf, {i,i+d}],
                                      ExponentFunction->(Null&), NumberSigns->s],
                   re@"\\.$"->""]]]
-shns[x_, sf_:10] := shn[x, sf, {"-","+"}]
+shns[x_, sf_:10] := shn[x, sf, {"-","+"}] (* signed version *)
 
 userget::usage = "Return Association of user info";
-userget[] := Association@parseJSON@URLFetch[baseurl<>"users/me.json", 
-  "Method"->"GET", "Parameters"->{"auth_token"->key}]
+userget[] := Association@parseJSON@URLFetch[
+  baseurl<>"users/me.json", 
+  "Method"->"GET", 
+  "Parameters"->{"auth_token"->key}]
 
-goalget::usage = "Return a hash of goal parameters for goal slug g";
+goalget::usage = "Return a hash of goal parameters for goal with goalname g";
 goalget[g_] := Association@parseJSON@URLFetch[
-  baseurl<>"users/me/goals/"<>g<>".json", "Method"->"GET",
-    "Parameters"->{"auth_token"->key}]
+  baseurl<>"users/me/goals/"<>g<>".json", 
+  "Method"->"GET",
+  "Parameters"->{"auth_token"->key}]
 
-(* Update goal with slug g with hash h *)
-goalput[g_, h___] := URLFetch[baseurl<>"users/me/goals/"<>g<>".json", 
-  "Method"->"PUT", "Parameters"->{"auth_token"->key, 
-  Sequence@@(#1->genJSON[#2]& @@@ {h})}]
+(* Update goal with goalname g with hash h *)
+goalput[g_, h___] := Association@parseJSON@URLFetch[
+  baseurl<>"users/me/goals/"<>g<>".json", 
+  "Method"->"PUT", 
+  "Parameters"->{"auth_token"->key, Splice[#1->genJSON[#2]& @@@ {h}]}]
 
 allgoals::usage = "Return a list of goal Associations"
-allgoals[] := Association /@ parseJSON@URLFetch[baseurl<>"users/me/goals.json",
-  "Method"->"GET", "Parameters"->{"auth_token"->key}]
+allgoals[] := Association /@ parseJSON@URLFetch[
+  baseurl<>"users/me/goals.json",
+  "Method"->"GET", 
+  "Parameters"->{"auth_token"->key}]
 
 shdt[Null] := ""
 shdt[t_] := DateString[FromUnixTime[t], {"MonthNameShort", "Day"}]
@@ -146,11 +137,57 @@ showroad0[road_, ru_] := MatrixForm[{shdt@#1, shv@#2, shr[#3, ru]}& @@@ road]
 showroad[gs_String] := With[{g = goalget[gs]},
   Grid[{{showroad0[g@"roadall", g@"runits"], Import[g@"thumb_url"]}}]]
 
+dataget::usage = "Return a list of datapoint Associations";
+dataget[g_] := Association /@ parseJSON@URLFetch[
+  baseurl<>"users/me/goals/"<>g<>"/datapoints.json",
+  "Parameters"->{"auth_token"->key}]
+
 datapost::usage = "Add list of datapoints d to a goal g";
 datapost[g_, d_] := Association@parseJSON@URLFetch[
   baseurl<>"users/me/goals/"<>g<>"/datapoints/create_all.json",
-  "Method"->"POST", "Parameters"->{"auth_token"->key, "datapoints"->genJSON[d]}]
+  "Method"->"POST", 
+  "Parameters"->{"auth_token"->key, "datapoints"->genJSON[d]}]
 
+dataput::usage = "Update a datapoint with the given id to have timestamp t etc";
+dataput[g_, id_, t_, v_, c_] := Association@parseJSON@URLFetch[
+  baseurl<>"users/me/goals/"<>g<>"/datapoints/"<>id<>".json",
+  "Method"->"PUT", 
+  "Parameters"->{"auth_token"->key, 
+    "timestamp" -> genJSON[t],  (* The gross special case in genJSON means *)
+    "value"     -> genJSON[v],  (* genJSON[c] here would be the same as not *)
+    "comment"   -> c            (* calling genJSON and just using c. *)
+  }]
+
+(*
+
+odomifyHelper[{prev_,offset_}, next_]:= {next, offset+If[prev>next==0, prev, 0]}
+odomify[l_List] := l + Rest[FoldList[odomifyHelper, {-Infinity,0}, l]][[All,2]]
+
+(* Turn the odometer-style goal with goalname g into a normal kyoomy do-more 
+   goal by replacing each datapoint value with the delta from the previous 
+   (aggregated) datapoint value. *)
+kyoomify[g_String] := Module[{go, k, a, o, data, vals, deltas, gq},
+  go = goalget[g];
+  k = go["kyoom"];
+  a = go["aggday"];
+  o = go["odom"];
+  data = Reverse[dataget[g]];
+  vals = #["value"]& /@ data;
+  deltas = Differences[vals];
+  If[k, Return["ERROR: Goal is already kyoom"]];
+  If[a =!= "last", Return[
+    "ERROR: This goal has aggday='"<>a<>"' but only 'last' is supported"]];
+  If[o, vals = odomify[vals]];
+  If[Min[deltas] < 0, Return[
+    "ERROR: Data must be monotone (other than odometer resets)"]];
+  gq = goalput[g, "kyoom" -> True, "aggday" -> "sum", "odom" -> False];
+  If[gq["kyoom"] =!= True || gq["aggday"] =!= "sum" || gq["odom"] =!= False, 
+    Return["UNKNOWN ERROR: Failed to update goal params (kyoom/aggday/odom)"]];
+  meach[{d_, delta_}, Transpose[{Rest[data], deltas}],
+    dataput[g, d["id"], d["timestamp"], delta, 
+            cat[d["comment"], "(*", d["value"], "*)"]]]]
+
+*)
 
 (*
 History-Destroying Retroratchet aka RETROratchet as opposed to Ratchet
@@ -163,13 +200,6 @@ WEEN/RASH: tini,vini -> tcur,vcur+yaw*rcur*(b-1)
 (* Take start and end points of a road, tcur/vcur, runits, dir, yaw, and the 
    desired number of days of safety buffer (b) and return a new roadall that 
    goes from {tini,vini} to tfin -- no rows except the {tfin,vfin,rfin} row. *)
-(* SCHDEL
-rr0[{{tini_, vini_, _}, ___, {tfin_, vfin_, rfin_}}, tcur_, vcur_, runits_, 
-    dir_, yaw_, b_] := With[{ru = SECS[runits]},
-  If[dir*yaw > 0,
-    {{tini,vini, Null}, {tfin, Null, (vcur-vini)/(tcur+b*SID-1-tini)*ru}},
-    {{tini,vini, Null}, {tfin, Null, (vcur-vini)/(tcur-tini+yaw(b-1)*SID)*ru}}]]
-*)
 rr0[tini_, vini_, {tfin_, vfin_, _}, tcur_, vcur_, runits_, dir_, yaw_, b_] :=
   With[{u = SECS[runits]},
     If[dir*yaw > 0,
@@ -200,7 +230,7 @@ retrat[gs_, b_] := Module[
            g@"runits", g@"dir",g@"yaw", b];
   goalput[gs, "roadall" -> genJSON[rr]]]
 
-(* TODO: canonicalize road matrix to merge redundant segments *)
+(* would be nice to canonicalize graph matrix to merge redundant segments *)
 
 End[]; (* Private context *)
 EndPackage[];
